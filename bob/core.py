@@ -6,7 +6,7 @@ from collections import defaultdict
 from .utils import get_latest_timestamp
 import logging
 from threading import Thread, Lock
-from queue import Queue, Empty, ShutDown
+from queue import Queue, Empty
 import argparse
 import subprocess
 from enum import Enum
@@ -14,6 +14,7 @@ import sys
 import shlex
 
 _registry: list["Target"] = list()
+
 
 class Recipe:
     """
@@ -24,6 +25,11 @@ class Recipe:
            NOTE: You have to pass raw=True to the contructor
         4. You can construct a recipe with just the program name and add flags with methods. (Recommended)
            NOTE: Internally this is translated to the 2. option.
+    Examples:
+        1. `Recipe(lambda: print("Hello World"))`
+        2. `Recipe(["gcc", "-Iinclude", "-omain", "main.c"])`
+        3. `Recipe("gcc -Iinclude -omain main.c", raw=True)`
+        4. `Recipe("gcc").add_include("include").add_output("main").add("main.c")`
     """
 
     class RecipeType(Enum):
@@ -32,7 +38,9 @@ class Recipe:
         RawRecipe = 2
         DefaultRecipe = 3
 
-    def __init__(self, input: Union[Callable, list, str, Path], raw: bool = False) -> None:
+    def __init__(
+        self, input: Union[Callable, list, str, Path], raw: bool = False
+    ) -> None:
         self.raw: bool = raw
         self.type: Recipe.RecipeType
         self.input: Union[Callable, list, str]
@@ -59,29 +67,36 @@ class Recipe:
 
     def __repr__(self):
         return f"<Recipe type={self.type.name} input={self.input}>"
-    
+
     def __str__(self) -> str:
         match self.type:
             case Recipe.RecipeType.CallableRecipe:
-                return f"<Callable: {getattr(self.input, '__name__', repr(self.input))}>"
+                return (
+                    f"<Callable: {getattr(self.input, '__name__', repr(self.input))}>"
+                )
             case Recipe.RecipeType.RawRecipe:
-                return self.input # pyright: ignore
+                return self.input  # pyright: ignore
             case Recipe.RecipeType.ListRecipe | Recipe.RecipeType.DefaultRecipe:
-                return shlex.join(self.input) # pyright: ignore
+                return shlex.join(self.input)  # pyright: ignore
             case _:
                 return "<unknown recipe>"
 
-    def run(self, _silent=False, _check=True):
-        if not _silent:
+    def run(self, silent=False, check=True):
+        if not silent:
             logging.getLogger("bob.cmd").info(str(self))
 
         match self.type:
             case Recipe.RecipeType.CallableRecipe:
                 self.input()  # pyright: ignore
             case Recipe.RecipeType.RawRecipe:
-                subprocess.run(self.input, shell=True, check=_check, capture_output=_silent)  # pyright: ignore
+                subprocess.run(
+                    self.input, # pyright: ignore
+                    shell=True,
+                    check=check,
+                    capture_output=silent,
+                )
             case Recipe.RecipeType.ListRecipe | Recipe.RecipeType.DefaultRecipe:
-                subprocess.run(self.input, check=_check, capture_output=_silent)  # pyright: ignore
+                subprocess.run(self.input, check=check, capture_output=silent)  # pyright: ignore
             case _:
                 raise RuntimeError("Recipe is not valid.")
 
@@ -107,7 +122,7 @@ class Recipe:
         return self
 
     def add_include(self, *args):
-        """Same as add(), only difference that it add the -I prefix for each arg."""
+        """Same as add(), only difference that it add the `-I` prefix for each arg."""
         if self.type not in [
             Recipe.RecipeType.DefaultRecipe,
             Recipe.RecipeType.ListRecipe,
@@ -118,7 +133,7 @@ class Recipe:
         return self
 
     def add_libinclude(self, *args):
-        """Same as add(), only difference that it add the -L prefix for each arg."""
+        """Same as add(), only difference that it add the `-L` prefix for each arg."""
         if self.type not in [
             Recipe.RecipeType.DefaultRecipe,
             Recipe.RecipeType.ListRecipe,
@@ -129,7 +144,7 @@ class Recipe:
         return self
 
     def add_link(self, *args):
-        """Same as add(), only difference that it add the -l prefix for each arg."""
+        """Same as add(), only difference that it add the `-l` prefix for each arg."""
         if self.type not in [
             Recipe.RecipeType.DefaultRecipe,
             Recipe.RecipeType.ListRecipe,
@@ -137,6 +152,17 @@ class Recipe:
             raise RuntimeError("You can only add to DefaultRecipe or ListRecipe")
 
         self.input.extend(map(lambda a: f"-l{str(a)}", args))  # pyright: ignore
+        return self
+
+    def add_output(self, output: Union[str, Path]):
+        """Adds `output` as a str to the Recipe with a `-o` prefix."""
+        if self.type not in [
+            Recipe.RecipeType.DefaultRecipe,
+            Recipe.RecipeType.ListRecipe,
+        ]:
+            raise RuntimeError("You can only add to DefaultRecipe or ListRecipe")
+
+        self.input.append(f"-o{str(output)}")  # pyright: ignore
         return self
 
     def clone(self):
@@ -179,7 +205,7 @@ class Target:
         ):
             self.dependencies = list(dependencies)
         else:
-            raise TypeError()  # TODO:
+            raise TypeError(f"{type(dependencies)} is not valid as dependencies.")
 
         if not (recipe is None or isinstance(recipe, Recipe)):
             raise TypeError("recipe can be only None or Recipe")
@@ -190,7 +216,9 @@ class Target:
         _registry.append(self)
 
     def __repr__(self):
-        return f"Target({self.name=}, {self.dependencies=}, {self.recipe=}, {self.phony=})"
+        return (
+            f"Target({self.name=}, {self.dependencies=}, {self.recipe=}, {self.phony=})"
+        )
 
     def resolve_dependencies(self):
         new = []
@@ -209,6 +237,7 @@ class Target:
                         found = True
                         break
                 if not found:
+                    logging.warning(f"No Target object found for {str(dep)}")
                     new.append(dep)
             else:
                 raise TypeError(f"Invalid dependency type: {type(dep)}")
@@ -308,6 +337,13 @@ def _parse_arguments(**kwargs) -> dict:
         action="store_true",
         help="Don't print commands.",
     )
+    parser.add_argument(
+        "-k",
+        "--keep-going",
+        required=False,
+        action="store_true",
+        help="Don't check returns of recipes, keep going even if one fails.",
+    )
 
     parser.set_defaults(**kwargs)
     args = parser.parse_args()
@@ -328,18 +364,22 @@ def _parse_arguments(**kwargs) -> dict:
     return args
 
 
-def build(**kwargs):
+def build(**kwargs) -> bool:
     """Should be called once at the end.
     There are three possibilities:
     1. Targets(s) are provided, they will be executed.
     2. None is provided, the function checks the command line arguments
        for target names.
     3. No command line arguments are provided, the first target in _registry is built.
+    Returns True if the build is successfull, else False
     """
 
     options = _parse_arguments(**kwargs)
     targets = options.get("targets", [])
-    if len(targets) == 0 and len(_registry) > 0:
+
+    if options.get("always_make", False):
+        targets = _registry
+    elif len(targets) == 0 and len(_registry) > 0:
         targets = [_registry[0]]
 
     graph, in_degree = build_dependency_graph(targets)
@@ -362,21 +402,26 @@ def build(**kwargs):
 
             try:
                 t: Target = queue.get(timeout=1)
-            except (Empty, ShutDown):
+            except Empty: # TODO: Could other Exceptions get thrown? 3.13: ShutDown
                 return
 
             if t.recipe is not None:
                 if t.should_build():
                     logging.debug(f"Building {t.name}")
                     try:
-                        t.recipe.run()
+                        t.recipe.run(
+                            silent=options.get("silent", False),
+                            check= not options.get("keep_going", False),
+                        )
                     except subprocess.CalledProcessError as e:
-                        logging.critical(f"Recipe failed in target {t.name}: {e.cmd} (exit code: {e.returncode})")
+                        logging.critical(
+                            f"Recipe failed in target {t.name}: {e.cmd} (exit code: {e.returncode})"
+                        )
                         fatal_error_event.set()
                         queue.task_done()
                         return
                     except Exception as e:
-                        logging.critical(f"Error in {t.name}: {e}")
+                        logging.critical(f"Unexpected error in {t.name}: {e}")
                         fatal_error_event.set()
                         queue.task_done()
                         return
@@ -391,9 +436,8 @@ def build(**kwargs):
                         scheduled.add(dependent)
             queue.task_done()
 
-    threads = [
-        Thread(target=worker) for _ in range(options.get("jobs", 1))
-    ]  # TODO: Get workers from command line
+    threads = [Thread(target=worker) for _ in range(options.get("jobs", 1))]
+
     for t in threads:
         t.start()
     queue.join()
@@ -402,7 +446,7 @@ def build(**kwargs):
 
     if fatal_error_event.is_set():
         logging.error("Build failed due to a critical error.")
-        return 1
+        return False
     else:
         logging.debug("Build successfull.")
-        return 0
+        return True
