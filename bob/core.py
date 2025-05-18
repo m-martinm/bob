@@ -1,5 +1,5 @@
 import threading
-from typing import Callable, Self, Union
+from typing import Callable, Union
 from pathlib import Path
 from collections.abc import Iterable
 from collections import defaultdict
@@ -69,36 +69,34 @@ class Recipe:
         return f"<Recipe type={self.type.name} input={self.input}>"
 
     def __str__(self) -> str:
-        match self.type:
-            case Recipe.RecipeType.CallableRecipe:
-                return (
-                    f"<Callable: {getattr(self.input, '__name__', repr(self.input))}>"
-                )
-            case Recipe.RecipeType.RawRecipe:
-                return self.input  # pyright: ignore
-            case Recipe.RecipeType.ListRecipe | Recipe.RecipeType.DefaultRecipe:
-                return shlex.join(self.input)  # pyright: ignore
-            case _:
-                return "<unknown recipe>"
+        if self.type == Recipe.RecipeType.CallableRecipe:
+            return (
+                f"<Callable: {getattr(self.input, '__name__', repr(self.input))}>"
+            )
+        elif self.type == Recipe.RecipeType.RawRecipe:
+            return self.input  # pyright: ignore
+        elif self.type in (Recipe.RecipeType.ListRecipe, Recipe.RecipeType.DefaultRecipe):
+            return shlex.join(self.input)  # pyright: ignore
+        else:
+            return "<unknown recipe>"
 
     def run(self, silent=False, check=True):
         if not silent:
             logging.getLogger("bob.cmd").info(str(self))
 
-        match self.type:
-            case Recipe.RecipeType.CallableRecipe:
-                self.input()  # pyright: ignore
-            case Recipe.RecipeType.RawRecipe:
-                subprocess.run(
-                    self.input,  # pyright: ignore
-                    shell=True,
-                    check=check,
-                    capture_output=silent,
-                )
-            case Recipe.RecipeType.ListRecipe | Recipe.RecipeType.DefaultRecipe:
-                subprocess.run(self.input, check=check, capture_output=silent)  # pyright: ignore
-            case _:
-                raise RuntimeError("Recipe is not valid.")
+        if self.type == Recipe.RecipeType.CallableRecipe:
+            self.input()  # pyright: ignore
+        elif self.type ==  Recipe.RecipeType.RawRecipe:
+            subprocess.run(
+                self.input,  # pyright: ignore
+                shell=True,
+                check=check,
+                capture_output=silent,
+            )
+        elif self.type in (Recipe.RecipeType.ListRecipe, Recipe.RecipeType.DefaultRecipe):
+            subprocess.run(self.input, check=check, capture_output=silent)  # pyright: ignore
+        else:
+            raise RuntimeError("Recipe is not valid.")
 
     # def set_program(self, prog: str | Path):
     #     if self.type not in [
@@ -176,7 +174,7 @@ class Target:
         self,
         name: str | Path | Iterable[str | Path],
         recipe: None | Recipe,
-        dependencies: "None | Target | Path | Iterable[Self | Path]" = None,
+        dependencies: "None | Target | Path | Iterable[Target | Path]" = None,
         phony: bool = False,
     ):
         if phony:
