@@ -3,7 +3,7 @@ from typing import Callable, Self, Union
 from pathlib import Path
 from collections.abc import Iterable
 from collections import defaultdict
-from .utils import get_latest_timestamp
+from .utils import get_latest_timestamp, get_root_dir
 import logging
 from threading import Thread, Lock
 from queue import Queue, Empty
@@ -90,7 +90,7 @@ class Recipe:
                 self.input()  # pyright: ignore
             case Recipe.RecipeType.RawRecipe:
                 subprocess.run(
-                    self.input, # pyright: ignore
+                    self.input,  # pyright: ignore
                     shell=True,
                     check=check,
                     capture_output=silent,
@@ -237,7 +237,7 @@ class Target:
                         found = True
                         break
                 if not found:
-                    logging.warning(f"No Target object found for {str(dep)}")
+                    # logging.warning(f"No Target object found for {str(dep)}") # TODO does this make sense?
                     new.append(dep)
             else:
                 raise TypeError(f"Invalid dependency type: {type(dep)}")
@@ -344,14 +344,27 @@ def _parse_arguments(**kwargs) -> dict:
         action="store_true",
         help="Don't check returns of recipes, keep going even if one fails.",
     )
+    parser.add_argument(
+        "-n",
+        "--dry-run",
+        required=False,
+        action="store_true",
+        help="Don't execute the recipes, just print them.",
+    )
 
     parser.set_defaults(**kwargs)
     args = parser.parse_args()
     args = vars(args)
+
     if args["debug"]:
         logging.basicConfig(format="%(message)s", level=logging.DEBUG)
     else:
         logging.basicConfig(format="%(message)s", level=logging.WARNING)
+
+    if args["dry_run"]:
+        if args["silent"]:
+            logging.warning("Turning off silent, since --dry-run was also provided.")
+        args["silent"] = False
 
     cmd_logger = logging.getLogger("bob.cmd")
     cmd_logger.propagate = False
@@ -402,29 +415,32 @@ def build(**kwargs) -> bool:
 
             try:
                 t: Target = queue.get(timeout=1)
-            except Empty: # TODO: Could other Exceptions get thrown? 3.13: ShutDown
+            except Empty:  # TODO: Could other Exceptions get thrown? 3.13: ShutDown
                 return
 
             if t.recipe is not None:
                 if t.should_build():
-                    logging.debug(f"Building {t.name}")
-                    try:
-                        t.recipe.run(
-                            silent=options.get("silent", False),
-                            check= not options.get("keep_going", False),
-                        )
-                    except subprocess.CalledProcessError as e:
-                        logging.critical(
-                            f"Recipe failed in target {t.name}: {e.cmd} (exit code: {e.returncode})"
-                        )
-                        fatal_error_event.set()
-                        queue.task_done()
-                        return
-                    except Exception as e:
-                        logging.critical(f"Unexpected error in {t.name}: {e}")
-                        fatal_error_event.set()
-                        queue.task_done()
-                        return
+                    if options.get("dry_run", False):
+                        logging.getLogger("bob.cmd").info(str(t.recipe))
+                    else:
+                        logging.debug(f"Building {t.name}")
+                        try:
+                            t.recipe.run(
+                                silent=options.get("silent", False),
+                                check=not options.get("keep_going", False),
+                            )
+                        except subprocess.CalledProcessError as e:
+                            logging.critical(
+                                f"Recipe failed in target {t.name}: {e.cmd} (exit code: {e.returncode})"
+                            )
+                            fatal_error_event.set()
+                            queue.task_done()
+                            return
+                        except Exception as e:
+                            logging.critical(f"Unexpected error in {t.name}: {e}")
+                            fatal_error_event.set()
+                            queue.task_done()
+                            return
                 else:
                     logging.debug(f"Skipping {t.name}")
 
@@ -450,3 +466,46 @@ def build(**kwargs) -> bool:
     else:
         logging.debug("Build successfull.")
         return True
+
+
+def generate_compiledb(
+    root: Union[None, Path] = None, output: Union[None, Path] = None
+):
+    """Generates a compile_commands.json for LSPs.
+    root: Root directory (will be used for directory key for each entry)
+    output: You can define where to generate the output. (Default: root / "compile_commands.json")
+    """
+    import json
+
+    TU_EXTENSIONS = (".c", ".cpp", ".cc", ".cxx", ".i", ".ii")
+    if root is None:
+        root = get_root_dir()
+
+    if output is None:
+        output = root / "compile_commands.json"
+
+    compile_db = []
+    for target in _registry:
+        recipe = target.recipe
+        if recipe is None or recipe.type == Recipe.RecipeType.CallableRecipe:
+            continue
+
+        if recipe.type == Recipe.RecipeType.RawRecipe:
+            args = shlex.split(recipe.input)  # pyright: ignore
+        else:
+            args = list(map(str, recipe.input))  # pyright: ignore
+
+        for arg in args:
+            if arg.endswith(TU_EXTENSIONS):
+                compile_db.append(
+                    {
+                        "directory": str(root),
+                        "arguments": args,
+                        "file": arg,
+                    }
+                )
+
+    with open(output, "w") as f:
+        json.dump(compile_db, f, indent=2)
+
+    logging.debug(f"Compile commands written to: {str(output)}")

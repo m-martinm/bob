@@ -14,8 +14,8 @@ makefiles you can define any recipe, for any file type.
 
 ## TODOs
 
-- [ ] Compilation database 
-- [ ] Dry run, see the output without actually executing it.
+- [x] Compilation database 
+- [x] Dry run, see the output without actually executing it.
 - [ ] Examples
 - [ ] Tests
 - [ ] Small wrapper around git clone
