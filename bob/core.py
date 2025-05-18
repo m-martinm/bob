@@ -81,12 +81,13 @@ class Recipe:
             return "<unknown recipe>"
 
     def run(self, silent=False, check=True):
-        if not silent:
+        logging.debug(f"Running {repr(self)}")
+        if not silent and self.type != Recipe.RecipeType.CallableRecipe: # TODO: Do we print callables?
             logging.getLogger("bob.cmd").info(str(self))
 
         if self.type == Recipe.RecipeType.CallableRecipe:
             self.input()  # pyright: ignore
-        elif self.type ==  Recipe.RecipeType.RawRecipe:
+        elif self.type == Recipe.RecipeType.RawRecipe:
             subprocess.run(
                 self.input,  # pyright: ignore
                 shell=True,
@@ -218,6 +219,9 @@ class Target:
             f"Target({self.name=}, {self.dependencies=}, {self.recipe=}, {self.phony=})"
         )
 
+    def __str__(self) -> str:
+        return f"{' '.join(map(str, self.name))}"
+
     def resolve_dependencies(self):
         new = []
         for dep in self.dependencies:
@@ -239,7 +243,7 @@ class Target:
                     new.append(dep)
             else:
                 raise TypeError(f"Invalid dependency type: {type(dep)}")
-        logging.debug(f"{self.name} resolved dependencies: {new}")
+        logging.debug(f"{self} resolved dependencies: {new}")
         self.dependencies = new
 
     def should_build(self) -> bool:
@@ -248,7 +252,7 @@ class Target:
 
         ret = False
         timestamp = get_latest_timestamp(self.name)  # pyright: ignore
-        logging.debug(f"Timestamp of {self.name}: {timestamp}")
+        logging.debug(f"Timestamp of {self}: {timestamp}")
         if timestamp is None:
             return True
         for d in self.dependencies:  # pyright: ignore
@@ -273,7 +277,7 @@ def build_dependency_graph(targets: list[Target]):
 
     def walk(t: Target):
         if t in stack:
-            error_msg = " -> ".join(str(x.name) for x in stack) + f" -> {t.name}"
+            error_msg = " -> ".join(str(x) for x in stack) + f" -> {t.name}"
             raise RuntimeError(f"Cyclic dependency: {error_msg}")
         if t in visited:
             return
@@ -297,7 +301,7 @@ def build_dependency_graph(targets: list[Target]):
         stack.remove(t)
 
     for t in targets:
-        logging.debug("Walking %s", t.name)
+        logging.debug("Walking %s", t)
         walk(t)
 
     return graph, in_degree
@@ -349,6 +353,13 @@ def _parse_arguments(**kwargs) -> dict:
         action="store_true",
         help="Don't execute the recipes, just print them.",
     )
+    parser.add_argument(
+        "-c",
+        "--compile-db",
+        required=False,
+        action="store_true",
+        help="Generates a compile_commands.json to the root directory.",
+    )
 
     parser.set_defaults(**kwargs)
     args = parser.parse_args()
@@ -379,8 +390,8 @@ def build(**kwargs) -> bool:
     """Should be called once at the end.
     There are three possibilities:
     1. Targets(s) are provided, they will be executed.
-    2. None is provided, the function checks the command line arguments
-       for target names.
+    2. The function checks the command line arguments for target names,
+       this overrides the provided targets.
     3. No command line arguments are provided, the first target in _registry is built.
     Returns True if the build is successfull, else False
     """
@@ -388,10 +399,32 @@ def build(**kwargs) -> bool:
     options = _parse_arguments(**kwargs)
     targets = options.get("targets", [])
 
+    logging.debug(f"Options: {options}")
+
+    if options.get("compile_db", False):
+        generate_compiledb()
+
     if options.get("always_make", False):
         targets = _registry
     elif len(targets) == 0 and len(_registry) > 0:
         targets = [_registry[0]]
+    else: # TODO: Check this logic, not sure if it handles everything correctly
+        targets_copy = [t for t in targets]
+        for idx, targ in enumerate(targets_copy):
+            for treg in _registry:
+                if str(targ) in map(str, treg.name):
+                    targets[idx] = treg
+                    break
+            else:
+                logging.warning(f"{targ} is not an existing Target, skipping.")
+                targets.remove(targ)
+                continue
+            break
+
+        if len(targets) == 0:
+            logging.critical(f"No valid target in {', '.join(targets_copy)}")
+            return False
+
 
     graph, in_degree = build_dependency_graph(targets)
 
@@ -416,12 +449,13 @@ def build(**kwargs) -> bool:
             except Empty:  # TODO: Could other Exceptions get thrown? 3.13: ShutDown
                 return
 
+
             if t.recipe is not None:
                 if t.should_build():
                     if options.get("dry_run", False):
                         logging.getLogger("bob.cmd").info(str(t.recipe))
                     else:
-                        logging.debug(f"Building {t.name}")
+                        logging.debug(f"Building {t}")
                         try:
                             t.recipe.run(
                                 silent=options.get("silent", False),
@@ -429,18 +463,17 @@ def build(**kwargs) -> bool:
                             )
                         except subprocess.CalledProcessError as e:
                             logging.critical(
-                                f"Recipe failed in target {t.name}: {e.cmd} (exit code: {e.returncode})"
+                                f"Recipe failed in target {t}: {e.cmd} (exit code: {e.returncode})"
                             )
                             fatal_error_event.set()
-                            queue.task_done()
-                            return
+                            break
                         except Exception as e:
-                            logging.critical(f"Unexpected error in {t.name}: {e}")
+                            logging.critical(f"Unexpected error in target {t} with Recipe {repr(t.recipe)}: {e}")
                             fatal_error_event.set()
-                            queue.task_done()
-                            return
+                            logging.debug(f"{fatal_error_event.is_set()=}")
+                            break
                 else:
-                    logging.debug(f"Skipping {t.name}")
+                    logging.debug(f"Skipping {t}")
 
             with lock:
                 for dependent in graph[t]:
@@ -449,6 +482,11 @@ def build(**kwargs) -> bool:
                         queue.put(dependent)
                         scheduled.add(dependent)
             queue.task_done()
+
+        if fatal_error_event.is_set(): # TODO: Could cause problems, not sure if this is safe.
+            with lock:
+                for _ in range(queue.unfinished_tasks):
+                    queue.task_done()
 
     threads = [Thread(target=worker) for _ in range(options.get("jobs", 1))]
 
@@ -481,6 +519,9 @@ def generate_compiledb(
 
     if output is None:
         output = root / "compile_commands.json"
+    elif isinstance(output, Path):
+        if output.is_dir():
+            output = output / "compile_commands.json"
 
     compile_db = []
     for target in _registry:
