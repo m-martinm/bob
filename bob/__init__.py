@@ -1,3 +1,3 @@
-from .core import Target, build
+from .core import Target, Recipe, build, generate_compiledb
 
-__all__ = ["Target", "build"]
+__all__ = ["Target", "Recipe", "build", "generate_compiledb"]
