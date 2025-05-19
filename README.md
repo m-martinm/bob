@@ -16,10 +16,11 @@ makefiles you can define any recipe, for any file type.
 
 - [x] Compilation database 
 - [x] Dry run, see the output without actually executing it.
+- [x] Small wrapper around git clone
+- [x] Small wrapper around requests
+- [ ] Print dependency grpah
 - [ ] Examples
 - [ ] Tests
-- [ ] Small wrapper around git clone
-- [ ] Small wrapper around requests
 
 ## Note
 
