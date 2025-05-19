@@ -10,7 +10,6 @@ from queue import Queue, Empty
 import argparse
 import subprocess
 from enum import Enum
-import sys
 import shlex
 
 _registry: list["Target"] = list()
@@ -81,7 +80,7 @@ class Recipe:
             return "<unknown recipe>"
 
     def run(self, silent=False, check=True):
-        logging.debug(f"Running {repr(self)}")
+        logging.getLogger("bob.log").debug(f"Running {repr(self)}")
         if not silent and self.type != Recipe.RecipeType.CallableRecipe: # TODO: Do we print callables?
             logging.getLogger("bob.cmd").info(str(self))
 
@@ -243,7 +242,7 @@ class Target:
                     new.append(dep)
             else:
                 raise TypeError(f"Invalid dependency type: {type(dep)}")
-        logging.debug(f"{self} resolved dependencies: {new}")
+        logging.getLogger("bob.log").debug(f"{self} resolved dependencies: {new}")
         self.dependencies = new
 
     def should_build(self) -> bool:
@@ -252,7 +251,7 @@ class Target:
 
         ret = False
         timestamp = get_latest_timestamp(self.name)  # pyright: ignore
-        logging.debug(f"Timestamp of {self}: {timestamp}")
+        logging.getLogger("bob.log").debug(f"Timestamp of {self}: {timestamp}")
         if timestamp is None:
             return True
         for d in self.dependencies:  # pyright: ignore
@@ -262,7 +261,7 @@ class Target:
                     return True
                 inp = d.name
             other_ts = get_latest_timestamp(inp)  # pyright: ignore
-            logging.debug(f"Timestamp of {inp}: {other_ts}")
+            logging.getLogger("bob.log").debug(f"Timestamp of {inp}: {other_ts}")
             if other_ts is not None and timestamp <= other_ts:
                 return True
 
@@ -301,7 +300,7 @@ def build_dependency_graph(targets: list[Target]):
         stack.remove(t)
 
     for t in targets:
-        logging.debug("Walking %s", t)
+        logging.getLogger("bob.log").debug("Walking %s", t)
         walk(t)
 
     return graph, in_degree
@@ -366,22 +365,12 @@ def _parse_arguments(**kwargs) -> dict:
     args = vars(args)
 
     if args["debug"]:
-        logging.basicConfig(format="%(message)s", level=logging.DEBUG)
-    else:
-        logging.basicConfig(format="%(message)s", level=logging.WARNING)
+        logging.getLogger("bob.log").setLevel(logging.DEBUG)
 
     if args["dry_run"]:
         if args["silent"]:
-            logging.warning("Turning off silent, since --dry-run was also provided.")
+            logging.getLogger("bob.log").warning("Turning off silent, since --dry-run was also provided.")
         args["silent"] = False
-
-    cmd_logger = logging.getLogger("bob.cmd")
-    cmd_logger.propagate = False
-    cmd_logger.setLevel(logging.INFO)  # always print
-
-    stream = logging.StreamHandler(sys.stdout)
-    stream.setFormatter(logging.Formatter("%(message)s"))  # no prefix
-    cmd_logger.addHandler(stream)
 
     return args
 
@@ -399,7 +388,7 @@ def build(**kwargs) -> bool:
     options = _parse_arguments(**kwargs)
     targets = options.get("targets", [])
 
-    logging.debug(f"Options: {options}")
+    logging.getLogger("bob.log").debug(f"Options: {options}")
 
     if options.get("compile_db", False):
         generate_compiledb()
@@ -416,13 +405,13 @@ def build(**kwargs) -> bool:
                     targets[idx] = treg
                     break
             else:
-                logging.warning(f"{targ} is not an existing Target, skipping.")
+                logging.getLogger("bob.log").warning(f"{targ} is not an existing Target, skipping.")
                 targets.remove(targ)
                 continue
             break
 
         if len(targets) == 0:
-            logging.critical(f"No valid target in {', '.join(targets_copy)}")
+            logging.getLogger("bob.log").critical(f"No valid target in {', '.join(targets_copy)}")
             return False
 
 
@@ -441,7 +430,7 @@ def build(**kwargs) -> bool:
     def worker():
         while True:
             if fatal_error_event.is_set():
-                logging.debug("Fatal event encountered, exiting thread.")
+                logging.getLogger("bob.log").debug("Fatal event encountered, exiting thread.")
                 return
 
             try:
@@ -455,25 +444,24 @@ def build(**kwargs) -> bool:
                     if options.get("dry_run", False):
                         logging.getLogger("bob.cmd").info(str(t.recipe))
                     else:
-                        logging.debug(f"Building {t}")
+                        logging.getLogger("bob.log").debug(f"Building {t}")
                         try:
                             t.recipe.run(
                                 silent=options.get("silent", False),
                                 check=not options.get("keep_going", False),
                             )
                         except subprocess.CalledProcessError as e:
-                            logging.critical(
+                            logging.getLogger("bob.log").critical(
                                 f"Recipe failed in target {t}: {e.cmd} (exit code: {e.returncode})"
                             )
                             fatal_error_event.set()
                             break
                         except Exception as e:
-                            logging.critical(f"Unexpected error in target {t} with Recipe {repr(t.recipe)}: {e}")
+                            logging.getLogger("bob.log").critical(f"Unexpected error in target {t} with Recipe {repr(t.recipe)}: {e}")
                             fatal_error_event.set()
-                            logging.debug(f"{fatal_error_event.is_set()=}")
                             break
                 else:
-                    logging.debug(f"Skipping {t}")
+                    logging.getLogger("bob.log").debug(f"Skipping {t}")
 
             with lock:
                 for dependent in graph[t]:
@@ -497,10 +485,10 @@ def build(**kwargs) -> bool:
         t.join()
 
     if fatal_error_event.is_set():
-        logging.error("Build failed due to a critical error.")
+        logging.getLogger("bob.log").error("Build failed due to a critical error.")
         return False
     else:
-        logging.debug("Build successfull.")
+        logging.getLogger("bob.log").debug("Build successfull.")
         return True
 
 
@@ -547,4 +535,4 @@ def generate_compiledb(
     with open(output, "w") as f:
         json.dump(compile_db, f, indent=2)
 
-    logging.debug(f"Compile commands written to: {str(output)}")
+    logging.getLogger("bob.log").debug(f"Compile commands written to: {str(output)}")
