@@ -91,6 +91,48 @@ def get_latest_timestamp(inp: Union[Path, Iterable[Path]]) -> Optional[float]:
         return latest
 
 
+def get_earliest_timestamp(inp: Union[Path, Iterable[Path]]) -> Optional[float]:
+    """
+    Returns the earliest modification time (st_mtime) of a file or set of files.
+    If any file doesn't exist, returns None.
+    """
+
+    def safe_stat_mtime(path: Path):
+        try:
+            return path.stat().st_mtime
+        except (OSError, ValueError, FileNotFoundError):
+            return None
+
+    if isinstance(inp, Path):
+        return safe_stat_mtime(inp)
+    elif isinstance(inp, Iterable):
+        latest = None
+        for x in inp:
+            if isinstance(x, Path):
+                ts = safe_stat_mtime(x)
+                if ts is None:
+                    return None
+                if latest is None or ts < latest:
+                    latest = ts
+
+        return latest
+
+
+def get_timestamps(files: Iterable[Path]) -> list[float]:
+    """
+    Returns the modification times (st_mtime) of files.
+    If a file doesn't exist, leaves it out of ret.
+    """
+
+    ret = []
+    for f in files:
+        try:
+            ret.append(f.stat().st_mtime)
+        except (OSError, ValueError, FileNotFoundError):
+            pass
+    return ret
+
+
 def get_available_compilers() -> Sequence[str]:
     """Searches for common compilers in the `PATH` and return a list of the found ones."""
     COMPILERS = [
@@ -115,7 +157,7 @@ def get_available_compilers() -> Sequence[str]:
     return [x for x in COMPILERS if shutil.which(x) is not None]
 
 
-def git_clone( # TODO: Clean up this function, should propagate errors, it should be handled by target
+def git_clone(  # TODO: Clean up this function, should propagate errors, it should be handled by target
     url: str,
     dir: Union[Path, None] = None,
     args: Union[Sequence[str], None] = None,
@@ -162,9 +204,11 @@ def git_clone( # TODO: Clean up this function, should propagate errors, it shoul
 
     return dir.resolve()
 
- # TODO: Document this function
-def fetch(url: str, dest: Union[Path, None] = None, overwrite=False, silent=False) -> Path:
 
+# TODO: Document this function
+def fetch(
+    url: str, dest: Union[Path, None] = None, overwrite=False, silent=False
+) -> Path:
     if dest is None:
         parsed_url = urllib.parse.urlparse(url)
         tmp = Path(parsed_url.path)
