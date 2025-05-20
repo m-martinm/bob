@@ -3,7 +3,7 @@ from typing import Callable, Union
 from pathlib import Path
 from collections.abc import Iterable
 from collections import defaultdict
-from .utils import get_latest_timestamp, get_root_dir
+from .utils import get_root_dir, get_timestamps
 import logging
 from threading import Thread, Lock
 from queue import Queue, Empty
@@ -11,6 +11,7 @@ import argparse
 import subprocess
 from enum import Enum
 import shlex
+import json
 
 _registry: list["Target"] = list()
 
@@ -18,7 +19,7 @@ _registry: list["Target"] = list()
 class Recipe:
     """
     A recipe can be multiple things.
-        1. A python callable object, so a function which gets called.
+        1. A python callable object.
         2. A list which gets passed to subprocess.run with check=True
         3. A str which gets passed to subprocess.run with check=True and shell=True
            NOTE: You have to pass raw=True to the contructor
@@ -37,9 +38,7 @@ class Recipe:
         RawRecipe = 2
         DefaultRecipe = 3
 
-    def __init__(
-        self, input: Union[Callable, list, str, Path], raw: bool = False
-    ) -> None:
+    def __init__(self, input: Union[Callable, list, str, Path], raw: bool = False):
         self.raw: bool = raw
         self.type: Recipe.RecipeType
         self.input: Union[Callable, list, str]
@@ -69,19 +68,22 @@ class Recipe:
 
     def __str__(self) -> str:
         if self.type == Recipe.RecipeType.CallableRecipe:
-            return (
-                f"<Callable: {getattr(self.input, '__name__', repr(self.input))}>"
-            )
+            return f"<Callable: {getattr(self.input, '__name__', repr(self.input))}>"
         elif self.type == Recipe.RecipeType.RawRecipe:
             return self.input  # pyright: ignore
-        elif self.type in (Recipe.RecipeType.ListRecipe, Recipe.RecipeType.DefaultRecipe):
+        elif self.type in (
+            Recipe.RecipeType.ListRecipe,
+            Recipe.RecipeType.DefaultRecipe,
+        ):
             return shlex.join(self.input)  # pyright: ignore
         else:
             return "<unknown recipe>"
 
     def run(self, silent=False, check=True):
         logging.getLogger("bob.log").debug(f"Running {repr(self)}")
-        if not silent and self.type != Recipe.RecipeType.CallableRecipe: # TODO: Do we print callables?
+        if (
+            not silent and self.type != Recipe.RecipeType.CallableRecipe
+        ):  # TODO: Do we print callables?
             logging.getLogger("bob.cmd").info(str(self))
 
         if self.type == Recipe.RecipeType.CallableRecipe:
@@ -93,21 +95,13 @@ class Recipe:
                 check=check,
                 capture_output=silent,
             )
-        elif self.type in (Recipe.RecipeType.ListRecipe, Recipe.RecipeType.DefaultRecipe):
+        elif self.type in (
+            Recipe.RecipeType.ListRecipe,
+            Recipe.RecipeType.DefaultRecipe,
+        ):
             subprocess.run(self.input, check=check, capture_output=silent)  # pyright: ignore
         else:
             raise RuntimeError("Recipe is not valid.")
-
-    # def set_program(self, prog: str | Path):
-    #     if self.type not in [
-    #         Recipe.RecipeType.DefaultRecipe,
-    #         Recipe.RecipeType.ListRecipe,
-    #     ]:
-    #         raise RuntimeError(
-    #             "You can only set the program for DefaultRecipe or ListRecipe"
-    #         )
-    #
-    #     self.input[0] = str(prog)  # pyright: ignore
 
     def add(self, *args):
         if self.type not in [
@@ -170,6 +164,26 @@ class Recipe:
 
 
 class Target:
+    """
+    This class is the base of the library. They work like makefile targets.
+    They have a name, which is an identifier for them and also represents the
+    output of the target. They have a recipe, which is basically what the target
+    does, for more info see the `Recipe` class. Targets can depend on other targets,
+    or files.
+    Phony targets are targets which do not produce a file.
+
+    Attributes:
+        name (str | Path | Iterable[str | Path]):
+            They can be `str` only for phony targets.
+        recipe (None | Recipe):
+            A recipe which will be executed in the `build()` function.
+        dependencies (None | Target | Path | Iterable[Target | Path])
+            Other targets or files. They will be checked to decide when and if the
+            target should be built.
+        phony (bool)
+            The target does not produce a file and will always be exected.
+    """
+
     def __init__(
         self,
         name: str | Path | Iterable[str | Path],
@@ -222,6 +236,11 @@ class Target:
         return f"{' '.join(map(str, self.name))}"
 
     def resolve_dependencies(self):
+        """
+        Resolves the dependencies of `self`.
+
+        Checks for self-dependencies and matches paths to targets.
+        """
         new = []
         for dep in self.dependencies:
             if isinstance(dep, Target):
@@ -238,7 +257,7 @@ class Target:
                         found = True
                         break
                 if not found:
-                    # logging.warning(f"No Target object found for {str(dep)}") # TODO does this make sense?
+                    # logging.warning(f"No Target object found for {str(dep)}") # TODO: does this make sense?
                     new.append(dep)
             else:
                 raise TypeError(f"Invalid dependency type: {type(dep)}")
@@ -246,29 +265,60 @@ class Target:
         self.dependencies = new
 
     def should_build(self) -> bool:
+        """
+        Decides if `self` should be built, based on timestamps.
+
+        If any of the paths in name is earlier (smaller) than any of the
+        timestamps of the dependencies it returns True.
+
+        Phony targets always return True.
+        If `self` depends on a phony target it also returns True.
+        Targets which as name only have a single Path which is a dir and
+        exists always return False.
+        """
+
         if self.phony:
             return True
+        elif (
+            len(self.name) == 1  # TODO: is this too specific?
+            and isinstance(self.name[0], Path)
+            and self.name[0].is_dir()
+            and self.name[0].exists()
+        ):
+            return False
 
-        ret = False
-        timestamp = get_latest_timestamp(self.name)  # pyright: ignore
-        logging.getLogger("bob.log").debug(f"Timestamp of {self}: {timestamp}")
-        if timestamp is None:
+        timestamps = get_timestamps(self.name)  # pyright: ignore
+        if not timestamps:
             return True
+
+        dep_files = []
         for d in self.dependencies:  # pyright: ignore
             inp = d
             if isinstance(d, Target):
                 if d.phony:
                     return True
                 inp = d.name
-            other_ts = get_latest_timestamp(inp)  # pyright: ignore
-            logging.getLogger("bob.log").debug(f"Timestamp of {inp}: {other_ts}")
-            if other_ts is not None and timestamp <= other_ts:
-                return True
+            if isinstance(inp, Iterable) and not isinstance(inp, (str, Path)):
+                dep_files.extend(inp)
+            else:
+                dep_files.append(inp)
 
-        return ret
+        dep_timestamps = get_timestamps(dep_files)
+        if not dep_timestamps:
+            return False
+
+        return min(timestamps) <= max(dep_timestamps)
 
 
-def build_dependency_graph(targets: list[Target]):
+def build_dependency_graph(targets: list[Target]) -> tuple[defaultdict, defaultdict]:
+    """
+    Builds a dependency graph.
+
+    Returns:
+        graph: Mapping from dependency to list of dependents
+        in_degree: Mapping from target to number of dependencies
+    """
+
     graph = defaultdict(list)  # dependency -> list of dependents
     in_degree = defaultdict(int)  # target -> number of dependencies [ready = 0]
     visited = set()
@@ -293,7 +343,10 @@ def build_dependency_graph(targets: list[Target]):
                 in_degree[t] += 1
                 walk(dep)
             elif isinstance(dep, Path):
-                continue
+                logging.getLogger("bob.log").debug(
+                    f"Skipping dependency ({str(Path)}) of {t}."
+                )
+                continue  # TODO: Should a Path be added to in_degree ?
             else:
                 raise TypeError(f"Invalid dependency type: {type(dep)}")
 
@@ -307,6 +360,15 @@ def build_dependency_graph(targets: list[Target]):
 
 
 def _parse_arguments(**kwargs) -> dict:
+    """
+    Internal command line parser, which tries to mimic the options of `make`.
+    It is called by the `build()` function.
+
+    It is not intended to be used by the user, but who am I to decide.
+
+    Return a `dict` of command line arguments.
+    """
+
     parser = argparse.ArgumentParser(description="BOB makefile")
     parser.add_argument("targets", nargs="*", help="Targets to build.")
     parser.add_argument(
@@ -369,19 +431,26 @@ def _parse_arguments(**kwargs) -> dict:
 
     if args["dry_run"]:
         if args["silent"]:
-            logging.getLogger("bob.log").warning("Turning off silent, since --dry-run was also provided.")
+            logging.getLogger("bob.log").warning(
+                "Turning off silent, since --dry-run was also provided."
+            )
         args["silent"] = False
 
     return args
 
 
 def build(**kwargs) -> bool:
-    """Should be called once at the end.
-    There are three possibilities:
-    1. Targets(s) are provided, they will be executed.
-    2. The function checks the command line arguments for target names,
-       this overrides the provided targets.
-    3. No command line arguments are provided, the first target in _registry is built.
+    """
+    The main entry point for the library. It does many things:
+        1. Parses command line arguments
+        2. Builds a dependency graph
+        3. Decides which targets should be built
+        4. Builds the targets based on the previous steps.
+
+    It passes the keyword arguments to the command line argument parser, which sets these as defaults.
+    This means that with command line arguments these can be overwritten.
+    This functions should be only called once in the script, after all the Targets are declared.
+
     Returns True if the build is successfull, else False
     """
 
@@ -397,7 +466,7 @@ def build(**kwargs) -> bool:
         targets = _registry
     elif len(targets) == 0 and len(_registry) > 0:
         targets = [_registry[0]]
-    else: # TODO: Check this logic, not sure if it handles everything correctly
+    else:  # TODO: Check this logic, not sure if it handles everything correctly
         targets_copy = [t for t in targets]
         for idx, targ in enumerate(targets_copy):
             for treg in _registry:
@@ -405,15 +474,18 @@ def build(**kwargs) -> bool:
                     targets[idx] = treg
                     break
             else:
-                logging.getLogger("bob.log").warning(f"{targ} is not an existing Target, skipping.")
+                logging.getLogger("bob.log").warning(
+                    f"{targ} is not an existing Target, skipping."
+                )
                 targets.remove(targ)
                 continue
             break
 
         if len(targets) == 0:
-            logging.getLogger("bob.log").critical(f"No valid target in {', '.join(targets_copy)}")
+            logging.getLogger("bob.log").critical(
+                f"No valid target in {', '.join(targets_copy)}"
+            )
             return False
-
 
     graph, in_degree = build_dependency_graph(targets)
 
@@ -430,14 +502,15 @@ def build(**kwargs) -> bool:
     def worker():
         while True:
             if fatal_error_event.is_set():
-                logging.getLogger("bob.log").debug("Fatal event encountered, exiting thread.")
+                logging.getLogger("bob.log").debug(
+                    "Fatal event encountered, exiting thread."
+                )
                 return
 
             try:
                 t: Target = queue.get(timeout=1)
             except Empty:  # TODO: Could other Exceptions get thrown? 3.13: ShutDown
                 return
-
 
             if t.recipe is not None:
                 if t.should_build():
@@ -457,7 +530,9 @@ def build(**kwargs) -> bool:
                             fatal_error_event.set()
                             break
                         except Exception as e:
-                            logging.getLogger("bob.log").critical(f"Unexpected error in target {t} with Recipe {repr(t.recipe)}: {e}")
+                            logging.getLogger("bob.log").critical(
+                                f"Unexpected error in target {t} with Recipe {repr(t.recipe)}: {e}"
+                            )
                             fatal_error_event.set()
                             break
                 else:
@@ -471,7 +546,9 @@ def build(**kwargs) -> bool:
                         scheduled.add(dependent)
             queue.task_done()
 
-        if fatal_error_event.is_set(): # TODO: Could cause problems, not sure if this is safe.
+        if (
+            fatal_error_event.is_set()
+        ):  # TODO: Could cause problems, not sure if this is safe.
             with lock:
                 for _ in range(queue.unfinished_tasks):
                     queue.task_done()
@@ -495,11 +572,11 @@ def build(**kwargs) -> bool:
 def generate_compiledb(
     root: Union[None, Path] = None, output: Union[None, Path] = None
 ):
-    """Generates a compile_commands.json for LSPs.
+    """
+    Generates a compile_commands.json for LSPs.
     root: Root directory (will be used for directory key for each entry)
     output: You can define where to generate the output. (Default: root / "compile_commands.json")
     """
-    import json
 
     TU_EXTENSIONS = (".c", ".cpp", ".cc", ".cxx", ".i", ".ii")
     if root is None:
