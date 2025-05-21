@@ -245,7 +245,7 @@ class Target:
         for dep in self.dependencies:
             if isinstance(dep, Target):
                 new.append(dep)
-            if isinstance(dep, Path):
+            elif isinstance(dep, Path):
                 found = False
                 for t in _registry:
                     if dep in t.name:

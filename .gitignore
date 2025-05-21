@@ -1,6 +1,6 @@
 example-project/
-env/
 test.py
 main.py
 **/__pycache__/
 bob.egg-info
+.coverage
