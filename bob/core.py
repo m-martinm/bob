@@ -1,3 +1,4 @@
+import os
 import threading
 from typing import Callable, Union
 from pathlib import Path
@@ -38,7 +39,7 @@ class Recipe:
         RawRecipe = 2
         DefaultRecipe = 3
 
-    def __init__(self, input: Union[Callable, list, str, Path], raw: bool = False):
+    def __init__(self, input: Union[Callable, list, str, Path], raw: bool = False, cwd: Union[Path, None] = None):
         self.raw: bool = raw
         self.type: Recipe.RecipeType
         self.input: Union[Callable, list, str]
@@ -62,6 +63,9 @@ class Recipe:
                 raise TypeError(
                     f"{type(input)} is not supported type for Recipe input."
                 )
+        if cwd is None:
+            cwd = Path.cwd()
+        self.cwd = cwd
 
     def __repr__(self):
         return f"<Recipe type={self.type.name} input={self.input}>"
@@ -87,19 +91,30 @@ class Recipe:
             logging.getLogger("bob.cmd").info(str(self))
 
         if self.type == Recipe.RecipeType.CallableRecipe:
+            current = Path.cwd()
+            if current != self.cwd:
+                os.chdir(self.cwd)
+            else:
+                current = None
+
             self.input()  # pyright: ignore
+
+            if current is not None:
+                os.chdir(current)
+
         elif self.type == Recipe.RecipeType.RawRecipe:
             subprocess.run(
                 self.input,  # pyright: ignore
                 shell=True,
                 check=check,
                 capture_output=silent,
+                cwd=self.cwd
             )
         elif self.type in (
             Recipe.RecipeType.ListRecipe,
             Recipe.RecipeType.DefaultRecipe,
         ):
-            subprocess.run(self.input, check=check, capture_output=silent)  # pyright: ignore
+            subprocess.run(self.input, check=check, capture_output=silent, cwd=self.cwd)  # pyright: ignore
         else:
             raise RuntimeError("Recipe is not valid.")
 
