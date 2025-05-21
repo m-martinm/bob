@@ -508,6 +508,7 @@ def build(**kwargs) -> bool:
     lock = Lock()
     scheduled = set()
     fatal_error_event = threading.Event()
+    should_be_built = len(in_degree.values())
 
     for target, value in in_degree.items():
         if value == 0:
@@ -515,11 +516,15 @@ def build(**kwargs) -> bool:
             scheduled.add(target)
 
     def worker():
+        built = 0 # TODO: Check if this works (tests are still passing, seems to be faster)
         while True:
             if fatal_error_event.is_set():
                 logging.getLogger("bob.log").debug(
                     "Fatal event encountered, exiting thread."
                 )
+                return
+
+            if built == should_be_built:
                 return
 
             try:
@@ -554,6 +559,7 @@ def build(**kwargs) -> bool:
                     logging.getLogger("bob.log").debug(f"Skipping {t}")
 
             with lock:
+                built += 1
                 for dependent in graph[t]:
                     in_degree[dependent] -= 1
                     if in_degree[dependent] == 0 and dependent not in scheduled:
@@ -567,7 +573,6 @@ def build(**kwargs) -> bool:
             with lock:
                 for _ in range(queue.unfinished_tasks):
                     queue.task_done()
-
     threads = [Thread(target=worker) for _ in range(options.get("jobs", 1))]
 
     for t in threads:
