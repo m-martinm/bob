@@ -39,7 +39,12 @@ class Recipe:
         RawRecipe = 2
         DefaultRecipe = 3
 
-    def __init__(self, input: Union[Callable, list, str, Path], raw: bool = False, cwd: Union[Path, None] = None):
+    def __init__(
+        self,
+        input: Union[Callable, list, str, Path],
+        raw: bool = False,
+        cwd: Union[Path, None] = None,
+    ):
         self.raw: bool = raw
         self.type: Recipe.RecipeType
         self.input: Union[Callable, list, str]
@@ -108,7 +113,7 @@ class Recipe:
                 shell=True,
                 check=check,
                 capture_output=silent,
-                cwd=self.cwd
+                cwd=self.cwd,
             )
         elif self.type in (
             Recipe.RecipeType.ListRecipe,
@@ -436,10 +441,30 @@ def _parse_arguments(**kwargs) -> dict:
         action="store_true",
         help="Generates a compile_commands.json to the root directory.",
     )
+    parser.add_argument(
+        "-l",
+        "--list",
+        required=False,
+        action="store_true",
+        help="List all available targets.",
+    )
 
     parser.set_defaults(**kwargs)
     args = parser.parse_args()
     args = vars(args)
+
+    if args["list"]:
+        # tmp = []
+        # for x in parser._actions:
+        #     tmp.append(x.dest)
+        #     tmp.extend(x.option_strings)
+        # print(", ".join(tmp))
+        logging.getLogger("bob.cmd").info(
+            "If a target consist of multiple filenames, it's enoguh to provide one.\nAvailable targets:"
+        )
+        for t in _registry:
+            logging.getLogger("bob.cmd").info(str(t))
+        exit(0)
 
     if args["debug"]:
         logging.getLogger("bob.log").setLevel(logging.DEBUG)
@@ -516,7 +541,8 @@ def build(**kwargs) -> bool:
             scheduled.add(target)
 
     def worker():
-        built = 0 # TODO: Check if this works (tests are still passing, seems to be faster)
+        # TODO: Check if this works (tests are still passing, seems to be faster)
+        built = 0
         while True:
             if fatal_error_event.is_set():
                 logging.getLogger("bob.log").debug(
