@@ -6,10 +6,12 @@ import shlex
 import subprocess
 import sys
 from collections.abc import Iterable
-from typing import Sequence, Union, Optional
+from typing import Literal, NamedTuple, Sequence, Union, Optional
 import shutil
 import urllib.request
 import urllib.parse
+from collections import namedtuple
+import platform
 
 
 def _configure_logging():
@@ -39,6 +41,37 @@ def _configure_logging():
         stream = logging.StreamHandler(sys.stderr)
         stream.setFormatter(logging.Formatter("[%(levelname)s] %(message)s"))
         bob_log.addHandler(stream)
+
+
+class SystemInfo(NamedTuple):
+    os: Union[
+        Literal["Windows"],
+        Literal["Linux"],
+        Literal["Darwin"],
+        Literal["Java"],
+        Literal[""],
+    ]
+    arch: str
+    python_version: str
+    is_64bit: bool
+
+
+def get_system_info():
+    """
+    Returns a namedtuple with the below described attributes.
+
+    Attributes:
+        os (str): "Windows" | "Linux" | "Darwin" | "Java" | ""
+        arch (str): See possible values: https://en.wikipedia.org/wiki/Uname (Not that reliable)
+        python_version (str): 'major.minor.patchlevel'
+        is_64bit (bool): sys.maxsize > 2**32
+    """
+    return SystemInfo(
+        platform.system(),  # pyright: ignore
+        platform.machine(),
+        platform.python_version(),
+        sys.maxsize > 2**32,
+    )
 
 
 def is_dir_empty(dir: Path) -> bool:
@@ -157,14 +190,18 @@ def get_available_compilers() -> Sequence[str]:
     return [x for x in COMPILERS if shutil.which(x) is not None]
 
 
-def git_clone(  # TODO: Clean up this function, should propagate errors, it should be handled by target
+def git_clone(
     url: str,
     dir: Union[Path, None] = None,
     args: Union[Sequence[str], None] = None,
     silent: bool = False,
+    **kwargs,
 ) -> Path:
     """
     Checks if `git` is in the `PATH` and passes everything to `git clone`.
+    You can pass args two ways:
+        git_clone(..., args = ["--branch", "master", "--depth", "1"])
+        git_clone(..., branch="master", depth=1)
     NOTE: Only works with urls in the form of https://host/user/repo.git
     Returns the Path to the cloned directory.
     Raises `NotADirectoryError` if `dir` is not empty.
@@ -181,6 +218,13 @@ def git_clone(  # TODO: Clean up this function, should propagate errors, it shou
 
     cmd = ["git", "clone"]
 
+    if kwargs:
+        if args is None:
+            args = []
+        for k, v in kwargs.items():
+            args.append(f"--{k}")  # pyright: ignore
+            args.append(str(v))  # pyright: ignore
+
     if args is not None:
         cmd.extend(args)
         cmd.append("--")
@@ -193,22 +237,29 @@ def git_clone(  # TODO: Clean up this function, should propagate errors, it shou
 
     if dir.exists() and not is_dir_empty(dir):
         raise NotADirectoryError(str(dir))
+
     cmd.append(str(dir))
 
     if not silent:
         logging.getLogger("bob.cmd").info(shlex.join(cmd))
-    try:
-        subprocess.run(cmd, check=True, capture_output=silent)
-    except subprocess.CalledProcessError as e:
-        logging.critical(f"Git failed: {e.cmd} (exit code: {e.returncode})")
+
+    subprocess.run(cmd, check=True, capture_output=silent)
 
     return dir.resolve()
 
 
-# TODO: Document this function
 def fetch(
     url: str, dest: Union[Path, None] = None, overwrite=False, silent=False
 ) -> Path:
+    """
+    Downloads an `url` to `dest`. **Be careful**, it simply streams the raw bytes into `dest`.
+
+    Attributes:
+        url (str): What do download
+        dest (Path, None): Where to download
+        overwrite (bool): Should it overwrite `dest` if it already exists
+        silent (bool): Should it print logs.
+    """
     if dest is None:
         parsed_url = urllib.parse.urlparse(url)
         tmp = Path(parsed_url.path)

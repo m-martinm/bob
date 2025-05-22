@@ -18,6 +18,7 @@ makefiles you can define any recipe, for any file type.
 - [x] Dry run, see the output without actually executing it.
 - [x] Small wrapper around git clone
 - [x] Small wrapper around requests
+- [ ] Move --keep-going options outside of run and simply continoue in except block
 - [ ] Print dependency grpah
 - [ ] Examples
 - [ ] Tests
